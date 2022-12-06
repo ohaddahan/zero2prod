@@ -1,9 +1,21 @@
+use crate::authentication::reject_anonymous_users;
 use crate::configuration::{DatabaseSettings, Settings};
 use crate::email_client::EmailClient;
-use crate::routes::{confirm, health_check, publish_newsletter, subscribe};
+use crate::routes::{
+    admin_dashboard, confirm, health_check, home, log_out, login, login_form, publish_newsletter,
+    publish_newsletter_form, subscribe,
+};
+use crate::routes::{change_password, change_password_form};
+use actix_session::storage::RedisSessionStore;
+use actix_session::SessionMiddleware;
+use actix_web::cookie::Key;
 use actix_web::dev::Server;
 use actix_web::middleware::Logger;
 use actix_web::{web, App, HttpServer};
+use actix_web_flash_messages::storage::CookieMessageStore;
+use actix_web_flash_messages::FlashMessagesFramework;
+use actix_web_lab::middleware::from_fn;
+use secrecy::{ExposeSecret, Secret};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Pool, Postgres};
 use std::net::TcpListener;
@@ -17,7 +29,7 @@ pub struct Application {
 impl Application {
     // We have converted the `build` function into a constructor for
     // `Application`.
-    pub async fn build(configuration: Settings) -> Result<Self, std::io::Error> {
+    pub async fn build(configuration: Settings) -> Result<Self, anyhow::Error> {
         let connection_pool = get_connection_pool(&configuration.database);
         let sender_email = configuration
             .email_client
@@ -41,7 +53,10 @@ impl Application {
             connection_pool,
             email_client,
             configuration.application.base_url,
-        )?;
+            HmacSecret(configuration.application.hmac_secret),
+            configuration.redis_uri,
+        )
+        .await?;
         // We "save" the bound port in one of `Application`'s fields
         Ok(Self { port, server })
     }
@@ -56,13 +71,21 @@ impl Application {
 }
 
 pub struct ApplicationBaseUrl(pub String);
+#[derive(Clone)]
+pub struct HmacSecret(pub Secret<String>);
 
-pub fn run(
+pub async fn run(
     listener: TcpListener,
     connection_pool: Pool<Postgres>,
     email_client: EmailClient,
     base_url: String,
-) -> Result<Server, std::io::Error> {
+    hmac_secret: HmacSecret,
+    redis_uri: Secret<String>,
+) -> Result<Server, anyhow::Error> {
+    let redis_store = RedisSessionStore::new(redis_uri.expose_secret()).await?;
+    let secret_key = Key::from(hmac_secret.0.expose_secret().as_bytes());
+    let message_store = CookieMessageStore::builder(secret_key.clone()).build();
+    let message_framework = FlashMessagesFramework::builder(message_store).build();
     // Wrap the connection in a smart pointer
     let db_pool = web::Data::new(connection_pool);
     let email_client = web::Data::new(email_client);
@@ -70,15 +93,33 @@ pub fn run(
     // Capture `connection` from the surrounding environment
     let server = HttpServer::new(move || {
         App::new()
+            .wrap(message_framework.clone())
+            .wrap(SessionMiddleware::new(
+                redis_store.clone(),
+                secret_key.clone(),
+            ))
             .wrap(TracingLogger::default())
             .wrap(Logger::default())
-            .route("/newsletters", web::post().to(publish_newsletter))
+            .route("/", web::get().to(home))
+            .route("/login", web::post().to(login))
+            .route("/login", web::get().to(login_form))
             .route("/subscriptions/confirm", web::get().to(confirm))
             .route("/health_check", web::get().to(health_check))
             .route("/subscriptions", web::post().to(subscribe))
+            .service(
+                web::scope("/admin")
+                    .wrap(from_fn(reject_anonymous_users))
+                    .route("/newsletters", web::post().to(publish_newsletter))
+                    .route("/newsletters", web::get().to(publish_newsletter_form))
+                    .route("/dashboard", web::get().to(admin_dashboard))
+                    .route("/password", web::get().to(change_password_form))
+                    .route("/password", web::post().to(change_password))
+                    .route("/logout", web::post().to(log_out)),
+            )
             .app_data(db_pool.clone())
             .app_data(email_client.clone())
             .app_data(base_url.clone())
+            .app_data(web::Data::new(hmac_secret.clone()))
     })
     .listen(listener)?
     .run();
