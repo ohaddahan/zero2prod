@@ -8,6 +8,17 @@
 
 `docker run zero2prod`
 
+## Sqlx
+
+### Offline
+
+`cargo sqlx prepare -- --lib`
+
+### Migrate
+`sqlx migrate run`
+
+### Create
+`sqlx migrate add <name>`
 
 ## Digital Ocean
 `doctl apps update YOUR-APP-ID --spec=spec.yaml`
