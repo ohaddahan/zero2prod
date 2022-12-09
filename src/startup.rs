@@ -10,7 +10,6 @@ use actix_session::storage::RedisSessionStore;
 use actix_session::SessionMiddleware;
 use actix_web::cookie::Key;
 use actix_web::dev::Server;
-use actix_web::middleware::Logger;
 use actix_web::{web, App, HttpServer};
 use actix_web_flash_messages::storage::CookieMessageStore;
 use actix_web_flash_messages::FlashMessagesFramework;
@@ -31,17 +30,7 @@ impl Application {
     // `Application`.
     pub async fn build(configuration: Settings) -> Result<Self, anyhow::Error> {
         let connection_pool = get_connection_pool(&configuration.database);
-        let sender_email = configuration
-            .email_client
-            .sender()
-            .expect("Invalid sender email address.");
-        let timeout = configuration.email_client.timeout();
-        let email_client = EmailClient::new(
-            configuration.email_client.base_url,
-            sender_email,
-            configuration.email_client.authorization_token,
-            timeout,
-        );
+        let email_client = configuration.email_client.client();
         let address = format!(
             "{}:{}",
             configuration.application.host, configuration.application.port
@@ -99,13 +88,7 @@ pub async fn run(
                 secret_key.clone(),
             ))
             .wrap(TracingLogger::default())
-            .wrap(Logger::default())
             .route("/", web::get().to(home))
-            .route("/login", web::post().to(login))
-            .route("/login", web::get().to(login_form))
-            .route("/subscriptions/confirm", web::get().to(confirm))
-            .route("/health_check", web::get().to(health_check))
-            .route("/subscriptions", web::post().to(subscribe))
             .service(
                 web::scope("/admin")
                     .wrap(from_fn(reject_anonymous_users))
@@ -116,6 +99,11 @@ pub async fn run(
                     .route("/password", web::post().to(change_password))
                     .route("/logout", web::post().to(log_out)),
             )
+            .route("/login", web::post().to(login))
+            .route("/login", web::get().to(login_form))
+            .route("/subscriptions/confirm", web::get().to(confirm))
+            .route("/health_check", web::get().to(health_check))
+            .route("/subscriptions", web::post().to(subscribe))
             .app_data(db_pool.clone())
             .app_data(email_client.clone())
             .app_data(base_url.clone())
